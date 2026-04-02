@@ -594,59 +594,280 @@ def filter_tree(raw):
         lines.pop()
     return "\n".join(lines) + "\n"
 
-# ── Dedup consecutive similar lines ──────────────────────────────────────────
+# ── Source code filtering ────────────────────────────────────────────────────
+
+LANGUAGE_EXTENSIONS = {
+    ".ts": "typescript", ".tsx": "typescript",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+    ".py": "python", ".pyw": "python",
+    ".rs": "rust", ".go": "go", ".java": "java",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp", ".cc": "cpp",
+}
+
+COMMENT_PATTERNS = {
+    "typescript": {"line": "//", "block_start": "/*", "block_end": "*/", "doc": "/**"},
+    "javascript": {"line": "//", "block_start": "/*", "block_end": "*/", "doc": "/**"},
+    "python":     {"line": "#", "doc": '"""'},
+    "rust":       {"line": "//", "block_start": "/*", "block_end": "*/", "doc": "///"},
+    "go":         {"line": "//", "block_start": "/*", "block_end": "*/", "doc": "//"},
+    "java":       {"line": "//", "block_start": "/*", "block_end": "*/", "doc": "/**"},
+    "c":          {"line": "//", "block_start": "/*", "block_end": "*/"},
+    "cpp":        {"line": "//", "block_start": "/*", "block_end": "*/"},
+}
+
+CAT_COMMANDS = ["cat", "head", "tail", "less", "more"]
+
+def detect_language(file_path):
+    dot = file_path.rfind(".")
+    if dot == -1:
+        return None
+    return LANGUAGE_EXTENSIONS.get(file_path[dot:].lower())
+
+def is_cat_command(cmd):
+    return command_matches(cmd, CAT_COMMANDS)
+
+def extract_file_path_from_command(cmd):
+    if not cmd:
+        return None
+    for seg in parse_segments(cmd):
+        for pipe_seg in parse_pipeline(seg):
+            parts = pipe_seg.split()
+            if not parts:
+                continue
+            if os.path.basename(parts[0]).lower() in CAT_COMMANDS:
+                for i in range(len(parts) - 1, 0, -1):
+                    if not parts[i].startswith("-"):
+                        return parts[i]
+    return None
+
+def filter_source_minimal(content, language):
+    patterns = COMMENT_PATTERNS.get(language, {})
+    lines = content.split("\n")
+    result = []
+    in_block = False
+    in_docstring = False
+
+    for line in lines:
+        trimmed = line.strip()
+
+        if language == "python" and patterns.get("doc"):
+            if trimmed.startswith(patterns["doc"]):
+                in_docstring = not in_docstring
+                result.append(line)
+                continue
+            if in_docstring:
+                result.append(line)
+                continue
+
+        block_start = patterns.get("block_start")
+        block_end = patterns.get("block_end")
+        doc_marker = patterns.get("doc")
+
+        if block_start and trimmed.startswith(block_start):
+            if doc_marker and trimmed.startswith(doc_marker):
+                result.append(line)
+                continue
+            in_block = True
+
+        if in_block:
+            if block_end and trimmed.endswith(block_end):
+                in_block = False
+            continue
+
+        line_comment = patterns.get("line")
+        if line_comment:
+            idx = line.find(line_comment)
+            if idx >= 0:
+                if doc_marker and trimmed.startswith(doc_marker):
+                    result.append(line)
+                    continue
+                result.append(line[:idx])
+                continue
+
+        result.append(line)
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(result)).strip()
+
+_IMPORT_RE = re.compile(r"^(use\s+|import\s+|from\s+|require\(|#include)")
+_SIGNATURE_RE = re.compile(r"^(pub\s+)?(async\s+)?(fn|def|function|func|class|struct|enum|trait|interface|type)\s+\w+")
+_CONST_RE = re.compile(r"^(const|static|let|pub\s+const|pub\s+static)\s+")
+
+def filter_source_aggressive(content, language):
+    minimal = filter_source_minimal(content, language)
+    lines = minimal.split("\n")
+    result = []
+    brace_depth = 0
+    in_impl = False
+
+    for line in lines:
+        trimmed = line.strip()
+
+        if _IMPORT_RE.match(trimmed):
+            result.append(line)
+            continue
+
+        if _SIGNATURE_RE.match(trimmed):
+            result.append(line)
+            in_impl = True
+            brace_depth = 0
+            continue
+
+        if in_impl:
+            opens = trimmed.count("{")
+            closes = trimmed.count("}")
+            brace_depth += opens - closes
+            if brace_depth <= 1 and (trimmed == "{" or trimmed == "}" or trimmed.endswith("{")):
+                result.append(line)
+            if brace_depth <= 0:
+                in_impl = False
+                if trimmed and trimmed != "}":
+                    result.append("    // ... implementation")
+            continue
+
+        if _CONST_RE.match(trimmed):
+            result.append(line)
+
+    return "\n".join(result).strip()
+
+# ── Token-level dedup ────────────────────────────────────────────────────────
 
 MIN_MATCH_CHARS = 15
 MIN_MATCH_RATIO = 0.7
 MAX_LENGTH_RATIO = 1.5
 
-def extract_pattern(a, b):
-    if not a and not b:
+_TOKEN_RE = re.compile(r"[a-zA-Z_]+|\d+|\s+|.")
+
+def _tokenize_line(line):
+    return [(m.group(), m.group().isdigit()) for m in _TOKEN_RE.finditer(line)]
+
+def _extract_token_pattern(tok_a, tok_b, len_a, len_b):
+    max_len = max(len_a, len_b)
+    min_len = min(len_a, len_b)
+    if max_len == 0:
         return None
-    max_len = max(len(a), len(b))
-    min_len = min(len(a), len(b))
     if min_len > 0 and max_len / min_len > MAX_LENGTH_RATIO:
         return None
-    prefix_len = 0
-    min_total = min(len(a), len(b))
-    while prefix_len < min_total and a[prefix_len] == b[prefix_len]:
-        prefix_len += 1
-    suffix_len = 0
-    while suffix_len < min_total - prefix_len and a[-(suffix_len+1)] == b[-(suffix_len+1)]:
-        suffix_len += 1
-    fixed_chars = prefix_len + suffix_len
+
+    prefix = []
+    pi = 0
+    while pi < len(tok_a) and pi < len(tok_b):
+        ta, na = tok_a[pi]
+        tb, nb = tok_b[pi]
+        if ta == tb:
+            prefix.append(("fixed", ta))
+        elif na and nb:
+            prefix.append(("numvar", None))
+        else:
+            break
+        pi += 1
+
+    suffix = []
+    si = 0
+    while si < len(tok_a) - pi and si < len(tok_b) - pi:
+        ta, na = tok_a[-(si + 1)]
+        tb, nb = tok_b[-(si + 1)]
+        if ta == tb:
+            suffix.append(("fixed", ta))
+        elif na and nb:
+            suffix.append(("numvar", None))
+        else:
+            break
+        si += 1
+
+    has_middle = pi + si < max(len(tok_a), len(tok_b))
+    fixed_chars = sum(len(t) for typ, t in prefix if typ == "fixed")
+    fixed_chars += sum(len(t) for typ, t in suffix if typ == "fixed")
+    var_count = (1 if has_middle else 0) + sum(1 for typ, _ in prefix if typ == "numvar") + sum(1 for typ, _ in suffix if typ == "numvar")
+
     if fixed_chars < MIN_MATCH_CHARS:
         return None
     if max_len > 0 and fixed_chars / max_len < MIN_MATCH_RATIO:
         return None
-    return {"prefix": a[:prefix_len], "suffix": a[-suffix_len:] if suffix_len > 0 else "", "fixed_chars": fixed_chars}
 
-def matches_pattern(line, pattern):
-    return line.startswith(pattern["prefix"]) and (not pattern["suffix"] or line.endswith(pattern["suffix"]))
+    return {"prefix": prefix, "suffix": suffix, "has_middle": has_middle, "fixed_chars": fixed_chars, "var_count": var_count}
+
+def _match_token_pattern(tokens, pattern):
+    if len(tokens) < len(pattern["prefix"]) + len(pattern["suffix"]):
+        return False
+    for i, (typ, text) in enumerate(pattern["prefix"]):
+        t, is_num = tokens[i]
+        if typ == "fixed" and t != text:
+            return False
+        if typ == "numvar" and not is_num:
+            return False
+    for i, (typ, text) in enumerate(pattern["suffix"]):
+        t, is_num = tokens[-(i + 1)]
+        if typ == "fixed" and t != text:
+            return False
+        if typ == "numvar" and not is_num:
+            return False
+    return True
+
+def _format_pattern(pattern):
+    parts = []
+    for typ, text in pattern["prefix"]:
+        parts.append(text if typ == "fixed" else "*")
+    if pattern["has_middle"]:
+        parts.append("*")
+    for typ, text in reversed(pattern["suffix"]):
+        parts.append(text if typ == "fixed" else "*")
+    return re.sub(r"\*{2,}", "*", "".join(parts)).strip()
+
+def _has_high_entropy(lines, start, end, pattern):
+    run_len = end - start
+    if run_len < 4 or pattern["var_count"] == 0:
+        return False
+    fixed_texts = set()
+    for typ, text in pattern["prefix"]:
+        if typ == "fixed":
+            fixed_texts.add(text)
+    for typ, text in pattern["suffix"]:
+        if typ == "fixed":
+            fixed_texts.add(text)
+    var_parts = set()
+    has_non_numeric = False
+    for j in range(start, end):
+        remaining = lines[j]
+        for f in fixed_texts:
+            remaining = remaining.replace(f, "")
+        remaining = remaining.strip()
+        var_parts.add(remaining)
+        if remaining and not re.fullmatch(r"[\d\s\W]*", remaining):
+            has_non_numeric = True
+    if not has_non_numeric:
+        return False
+    total_var_len = sum(len(v) for v in var_parts)
+    if total_var_len / max(len(var_parts), 1) <= 3:
+        return False
+    return len(var_parts) / run_len > 0.6
 
 def dedup_consecutive(lines, min_run):
     if len(lines) < min_run:
         return lines, 0
+    all_tokens = [_tokenize_line(l) for l in lines]
     result = []
     deduped = 0
     i = 0
     while i < len(lines):
         pattern = None
         if i + 1 < len(lines):
-            pattern = extract_pattern(lines[i], lines[i+1])
+            pattern = _extract_token_pattern(all_tokens[i], all_tokens[i + 1], len(lines[i]), len(lines[i + 1]))
         if not pattern:
             result.append(lines[i]); i += 1; continue
         run_end = i + 2
-        while run_end < len(lines) and matches_pattern(lines[run_end], pattern):
+        while run_end < len(lines) and _match_token_pattern(all_tokens[run_end], pattern):
             run_end += 1
         run_len = run_end - i
         if run_len < min_run:
             for j in range(i, run_end):
                 result.append(lines[j])
             i = run_end; continue
+        if _has_high_entropy(lines, i, run_end, pattern):
+            for j in range(i, run_end):
+                result.append(lines[j])
+            i = run_end; continue
         result.append(lines[i])
-        pat_display = pattern["prefix"] + "*" + pattern["suffix"]
-        result.append(f"[x {run_len - 1} similar: {pat_display}]")
+        result.append(f"[x {run_len - 1} similar: {_format_pattern(pattern)}]")
         deduped += run_len - 1
         i = run_end
     return result, deduped
@@ -760,6 +981,16 @@ def filter_output(text, command):
         if out != text:
             text = out
             techniques.append("tree")
+
+    elif is_cat_command(command):
+        fpath = extract_file_path_from_command(command)
+        if fpath:
+            lang = detect_language(fpath)
+            if lang:
+                out = filter_source_minimal(text, lang)
+                if out != text:
+                    text = out
+                    techniques.append("source")
 
     # 3. Generic pipeline: column trim -> dedup -> row trim
     lines = text.split("\n")
