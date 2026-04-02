@@ -277,6 +277,69 @@ def is_git_command(cmd):
 def is_git_patch_command(cmd):
     return command_matches(cmd, ["git diff", "git show"])
 
+DIFF_COMMANDS = ["diff", "colordiff"]
+
+def is_diff_command(cmd):
+    return command_matches(cmd, DIFF_COMMANDS)
+
+def compact_diff(output, max_lines=50):
+    lines = output.split("\n")
+    result = []
+    current_file = ""
+    added = 0
+    removed = 0
+    in_hunk = False
+    hunk_lines = 0
+    max_hunk_lines = 10
+
+    for line in lines:
+        if len(result) >= max_lines:
+            result.append("\n... (more changes truncated)")
+            break
+
+        if line.startswith("diff --git"):
+            if current_file and (added > 0 or removed > 0):
+                result.append(f"  +{added} -{removed}")
+            m = re.match(r"diff --git a/(.+) b/(.+)", line)
+            current_file = m.group(2) if m else "unknown"
+            result.append(f"\n{current_file}")
+            added = 0
+            removed = 0
+            in_hunk = False
+            continue
+
+        if line.startswith("@@"):
+            in_hunk = True
+            hunk_lines = 0
+            hunk_info = re.match(r"(@@ .+ @@)", line)
+            result.append(f"  {hunk_info.group(1) if hunk_info else '@@'}")
+            continue
+
+        if in_hunk:
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+                if hunk_lines < max_hunk_lines:
+                    result.append(f"  {line}")
+                    hunk_lines += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+                if hunk_lines < max_hunk_lines:
+                    result.append(f"  {line}")
+                    hunk_lines += 1
+            elif hunk_lines < max_hunk_lines and not line.startswith("\\"):
+                if hunk_lines > 0:
+                    result.append(f"  {line}")
+                    hunk_lines += 1
+
+            if hunk_lines == max_hunk_lines:
+                result.append("  ... (truncated)")
+                hunk_lines += 1
+
+    if current_file and (added > 0 or removed > 0):
+        result.append(f"  +{added} -{removed}")
+
+    return "\n".join(result)
+
 def compact_status(output):
     lines = output.split("\n")
     if not lines or (len(lines) == 1 and not lines[0].strip()):
@@ -442,7 +505,55 @@ SEARCH_COMMANDS = ["grep", "rg", "find", "ack", "ag"]
 def is_search_command(cmd):
     return command_matches(cmd, SEARCH_COMMANDS)
 
-def group_search_results(output, max_results=50):
+def _extract_search_pattern(cmd):
+    if not cmd:
+        return None
+    for seg in parse_segments(cmd):
+        for pipe_seg in parse_pipeline(seg):
+            parts = pipe_seg.split()
+            if not parts:
+                continue
+            base = os.path.basename(parts[0]).lower()
+            if base not in SEARCH_COMMANDS:
+                continue
+            for i in range(1, len(parts)):
+                p = parts[i]
+                if p.startswith("-"):
+                    if p in ("-e", "--regexp", "-p", "--pattern") and i + 1 < len(parts):
+                        return parts[i + 1].strip("'\"")
+                    continue
+                return p.strip("'\"")
+    return None
+
+def _compact_path(path, max_len=50):
+    if len(path) <= max_len:
+        return path
+    parts = path.split("/")
+    if len(parts) <= 3:
+        return path
+    return f"{parts[0]}/.../{parts[-2]}/{parts[-1]}"
+
+def _smart_truncate_line(line, max_len=70, pattern=None):
+    trimmed = line.strip()
+    if len(trimmed) <= max_len:
+        return trimmed
+    if pattern:
+        idx = trimmed.lower().find(pattern.lower())
+        if idx >= 0:
+            start = max(0, idx - max_len // 3)
+            end = min(len(trimmed), start + max_len)
+            if end == len(trimmed):
+                start = max(0, end - max_len)
+            sl = trimmed[start:end]
+            if start > 0 and end < len(trimmed):
+                return f"...{sl}..."
+            elif start > 0:
+                return f"...{sl}"
+            else:
+                return f"{sl}..."
+    return trimmed[:max_len - 3] + "..."
+
+def group_search_results(output, max_results=50, search_pattern=None):
     results = []
     for line in output.split("\n"):
         if not line.strip():
@@ -463,9 +574,9 @@ def group_search_results(output, max_results=50):
         if shown >= max_results:
             break
         matches = by_file[f]
-        out += f"{f} ({len(matches)} matches):\n"
+        out += f"{_compact_path(f)} ({len(matches)} matches):\n"
         for match in matches[:10]:
-            content = match["content"].strip()[:70]
+            content = _smart_truncate_line(match["content"], 70, search_pattern)
             out += f"    {match['line']}: {content}\n"
             shown += 1
         if len(matches) > 10:
@@ -957,6 +1068,18 @@ def filter_output(text, command):
             text = out
             techniques.append("git")
 
+    elif is_git_patch_command(command):
+        out = compact_diff(text)
+        if out and out != text:
+            text = out
+            techniques.append("diff")
+
+    elif is_diff_command(command):
+        out = compact_diff(text)
+        if out and out != text:
+            text = out
+            techniques.append("diff")
+
     elif is_linter_command(command):
         out = aggregate_linter_output(text, command)
         if out and out != text:
@@ -964,7 +1087,8 @@ def filter_output(text, command):
             techniques.append("linter")
 
     elif is_search_command(command):
-        out = group_search_results(text)
+        search_pat = _extract_search_pattern(command)
+        out = group_search_results(text, search_pattern=search_pat)
         if out and out != text:
             text = out
             techniques.append("search")
