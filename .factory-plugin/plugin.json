@@ -1,0 +1,8 @@
+{
+  "name": "rtk-plugin",
+  "description": "RTK (Result Token Killer) — reduces token consumption by intelligently filtering tool output (build, test, git, linter, search, ls/tree)",
+  "version": "1.0.0",
+  "author": {
+    "name": "bean"
+  }
+}

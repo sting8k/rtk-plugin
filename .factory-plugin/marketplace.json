@@ -1,0 +1,11 @@
+{
+  "name": "rtk-plugin",
+  "description": "RTK (Result Token Killer) — reduces token consumption by filtering tool output",
+  "plugins": [
+    {
+      "name": "rtk-plugin",
+      "description": "RTK (Result Token Killer) — reduces token consumption by filtering tool output",
+      "source": "."
+    }
+  ]
+}

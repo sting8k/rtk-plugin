@@ -1,0 +1,17 @@
+{
+  "description": "RTK output filter — wraps Execute commands to reduce token consumption",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${DROID_PLUGIN_ROOT}/hooks/rtk-filter.py\" hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
