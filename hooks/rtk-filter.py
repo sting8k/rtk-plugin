@@ -112,9 +112,29 @@ BUILD_COMMANDS = [
 
 SKIP_PATTERNS = [
     re.compile(r"^\s*(Compiling|Checking|Downloading|Downloaded|Fetching|Fetched|Updating|Updated|Building|Generated|Creating|Running)\s+"),
+    re.compile(r"^#\s+\S+"),                        # go: # mypackage/path
+    re.compile(r"^Found \d+ errors?"),               # tsc: Found N error(s).
 ]
-ERROR_START = [re.compile(r"^error\["), re.compile(r"^error:"), re.compile(r"^\[ERROR\]"), re.compile(r"^FAIL")]
-WARNING_PAT = [re.compile(r"^warning:"), re.compile(r"^\[WARNING\]"), re.compile(r"^warn:")]
+ERROR_START = [
+    re.compile(r"^error\["),                        # cargo: error[E0308]
+    re.compile(r"^error:", re.I),                    # generic / swc
+    re.compile(r"^\[ERROR\]"),                       # maven / gradle
+    re.compile(r"^FAIL"),                            # generic
+    re.compile(r"^.+\(\d+,\d+\):\s*error\s+TS"),    # tsc: file.ts(1,5): error TS2307
+    re.compile(r"^.+\.\w+:\d+:\d+:\s*error\b"),     # gcc/clang: file.c:10:5: error
+    re.compile(r"^\.?/.+\.\w+:\d+:\d+:\s"),         # go: ./file.go:10:5: msg (no 'error' keyword)
+    re.compile(r"^e:\s+.+:\d+:\d+:"),               # kotlin/gradle: e: file.kt:1:5:
+    re.compile(r"^make.*:\s*\*\*\*"),                # make: *** [target] Error
+    re.compile(r"^ERROR\b"),                         # esbuild / generic uppercase
+]
+WARNING_PAT = [
+    re.compile(r"^warning:", re.I),                  # cargo / generic
+    re.compile(r"^\[WARNING\]"),                     # maven / gradle
+    re.compile(r"^warn:", re.I),                     # generic
+    re.compile(r"^.+\(\d+,\d+\):\s*warning\s+TS"),  # tsc: file.ts(1,5): warning TS...
+    re.compile(r"^.+:\d+:\d+:\s*warning\b"),         # gcc/clang/go: file.go:10:5: warning
+    re.compile(r"^w:\s+.+:\d+:\d+:"),               # kotlin/gradle: w: file.kt:1:5:
+]
 
 def is_build_command(cmd):
     return command_matches(cmd, BUILD_COMMANDS)
@@ -150,7 +170,7 @@ def filter_build_output(output, cmd):
                     in_error = False; current_error = []
                 else:
                     current_error.append(line)
-            elif re.match(r"^\s", line) or line.startswith("-->"):
+            elif re.match(r"^\s", line) or line.startswith("-->") or re.match(r"^\s*[\|^~]", line):
                 current_error.append(line); blank_count = 0
             else:
                 errors.append(current_error[:])
@@ -181,9 +201,10 @@ TEST_COMMANDS = ["test", "jest", "vitest", "pytest", "cargo test", "bun test", "
 
 TEST_RESULT_PATTERNS = [
     re.compile(r"test result:\s*(?:\w+)\.\s*(\d+)\s*passed;\s*(\d+)\s*failed;"),
-    re.compile(r"(\d+)\s*passed(?:,\s*(\d+)\s*failed)?(?:,\s*(\d+)\s*skipped)?", re.I),
-    re.compile(r"(\d+)\s*pass(?:,\s*(\d+)\s*fail)?(?:,\s*(\d+)\s*skip)?", re.I),
-    re.compile(r"tests?:\s*(\d+)\s*passed(?:,\s*(\d+)\s*failed)?(?:,\s*(\d+)\s*skipped)?", re.I),
+    re.compile(r"\b(\d+)\s+failed,\s*(\d+)\s+passed", re.I),
+    re.compile(r"\b(\d+)\s+passed(?:,\s*(\d+)\s+failed)?(?:,\s*(\d+)\s+skipped)?", re.I),
+    re.compile(r"\b(\d+)\s+pass(?:,\s*(\d+)\s+fail)?(?:,\s*(\d+)\s+skip)?", re.I),
+    re.compile(r"tests?:\s*(\d+)\s+passed(?:,\s*(\d+)\s+failed)?(?:,\s*(\d+)\s+skipped)?", re.I),
 ]
 
 FAILURE_START = [
@@ -201,8 +222,13 @@ def aggregate_test_output(output, cmd):
     for pat in TEST_RESULT_PATTERNS:
         m = pat.search(output)
         if m:
-            passed = int(m.group(1) or 0)
-            failed = int(m.group(2) or 0) if m.lastindex >= 2 and m.group(2) else 0
+            is_failed_first = "failed" in pat.pattern and pat.pattern.index("failed") < pat.pattern.index("passed")
+            if is_failed_first:
+                failed = int(m.group(1) or 0)
+                passed = int(m.group(2) or 0) if m.lastindex >= 2 and m.group(2) else 0
+            else:
+                passed = int(m.group(1) or 0)
+                failed = int(m.group(2) or 0) if m.lastindex >= 2 and m.group(2) else 0
             skipped = int(m.group(3) or 0) if m.lastindex >= 3 and m.group(3) else 0
             break
 

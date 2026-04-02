@@ -68,6 +68,27 @@ Modified: 2 files
 
 Commands not matching any category still get generic filtering: ANSI stripping, line dedup, column/row trimming, and middle truncation.
 
+## Benchmark
+
+Token savings measured with realistic outputs modeled on real agent sessions (`python3 benchmark.py`):
+
+| Command | Original | Filtered | Saved | Reduction |
+|---------|----------|----------|-------|-----------|
+| `tsc --noEmit` (30 errors) | 805 tk | 141 tk | 664 tk | 82.5% |
+| `cargo build` (120 units, 3 err, 5 warn) | 2,335 tk | 84 tk | 2,251 tk | 96.4% |
+| `go test -v` (12 pass, 2 fail) | 874 tk | 23 tk | 851 tk | 97.4% |
+| `vitest` (13 suites, 66 pass) | 214 tk | 214 tk | 0 tk | 0.0% |
+| `git status` (300 untracked) | 2,088 tk | 17 tk | 2,071 tk | 99.2% |
+| `git log` (25 commits) | 384 tk | 318 tk | 66 tk | 17.2% |
+| `git diff` (6 files, multi-hunk) | 636 tk | 374 tk | 262 tk | 41.2% |
+| `eslint` (45 issues, 12 files) | 1,228 tk | 156 tk | 1,072 tk | 87.3% |
+| `rg` search (60 matches, 15 files) | 1,770 tk | 1,344 tk | 426 tk | 24.1% |
+| `ls -la` (24 entries) | 384 tk | 116 tk | 268 tk | 69.8% |
+| `cat` source.ts (80 lines) | 581 tk | 478 tk | 103 tk | 17.7% |
+| **Total** | **11,299 tk** | **3,265 tk** | **8,034 tk** | **70.1%** |
+
+Token count approximated as `len(text) / 4`. Compact outputs (e.g. vitest with only summary lines) are passed through unchanged.
+
 ## License
 
 MIT
