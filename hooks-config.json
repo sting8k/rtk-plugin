@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$FACTORY_PROJECT_DIR/.factory/hooks/rtk-filter.py\" hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Execute",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$FACTORY_PROJECT_DIR/.factory/hooks/tilth-nudge.py\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
